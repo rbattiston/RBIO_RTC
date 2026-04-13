@@ -26,6 +26,7 @@
 #include "sntp_server.h"
 #include "espnow_time.h"
 #include "http_server.h"
+#include "status_led.h"
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -59,6 +60,9 @@ void app_main(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "DS3231 init failed — will rely on NTP when available");
     }
+
+    /* Status LED — lights up red immediately (no time yet) */
+    status_led_init();
 
     ESP_LOGI(TAG, "[2/5] Loading time from RTC...");
     time_manager_init();
