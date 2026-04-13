@@ -1,0 +1,23 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "ds3231.c"
+        "time_manager.c"
+        "wifi_manager.c"
+        "sntp_server.c"
+        "espnow_time.c"
+        "http_server.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        driver
+        esp_driver_i2c
+        esp_driver_uart
+        esp_wifi
+        esp_netif
+        esp_event
+        nvs_flash
+        lwip
+        esp_timer
+        esp_http_server
+        mbedtls
+)

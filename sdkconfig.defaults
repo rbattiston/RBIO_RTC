@@ -1,0 +1,11 @@
+# Watchdog
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+
+# Log level
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# FreeRTOS tick rate - 100Hz is plenty for minute-level accuracy
+CONFIG_FREERTOS_HZ=100
+
+# SNTP — we configure 4 upstream NTP servers
+CONFIG_LWIP_SNTP_MAX_SERVERS=4
