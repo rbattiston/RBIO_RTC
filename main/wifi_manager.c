@@ -85,8 +85,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t base,
             break;
         }
         case WIFI_EVENT_STA_START:
-            ESP_LOGI(TAG, "STA started, connecting to '%s'...", s_sta_ssid);
-            esp_wifi_connect();
+            ESP_LOGI(TAG, "STA interface started");
+            /* Don't connect here — connect_sta() handles it after setting config */
             break;
         case WIFI_EVENT_STA_DISCONNECTED: {
             s_sta_connected = false;
@@ -156,10 +156,14 @@ static esp_err_t connect_sta(void)
     strncpy((char *)sta_cfg.sta.ssid, s_sta_ssid, sizeof(sta_cfg.sta.ssid) - 1);
     strncpy((char *)sta_cfg.sta.password, password, sizeof(sta_cfg.sta.password) - 1);
 
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set STA config: %s", esp_err_to_name(err));
+        return err;
+    }
 
     s_retry_count = 0;
-    ESP_LOGI(TAG, "STA configured for '%s'", s_sta_ssid);
+    ESP_LOGI(TAG, "STA configured for '%s', connecting...", s_sta_ssid);
 
     return esp_wifi_connect();
 }
