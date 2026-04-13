@@ -7,5 +7,6 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # FreeRTOS tick rate - 100Hz is plenty for minute-level accuracy
 CONFIG_FREERTOS_HZ=100
 
-# SNTP — we configure 4 upstream NTP servers
+# SNTP — 4 upstream servers, poll every 6 hours
 CONFIG_LWIP_SNTP_MAX_SERVERS=4
+CONFIG_LWIP_SNTP_UPDATE_DELAY=21600000

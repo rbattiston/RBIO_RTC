@@ -398,6 +398,15 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── GET /favicon.ico ── silence browser 404 spam ───────────────── */
+
+static esp_err_t favicon_handler(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "204 No Content");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
 /* ── Server startup ─────────────────────────────────────────────── */
 
 esp_err_t http_server_start(void)
@@ -414,6 +423,7 @@ esp_err_t http_server_start(void)
     }
 
     static const httpd_uri_t uris[] = {
+        { .uri = "/favicon.ico",  .method = HTTP_GET,  .handler = favicon_handler },
         { .uri = "/",             .method = HTTP_GET,  .handler = index_get_handler },
         { .uri = "/wifi",         .method = HTTP_POST, .handler = wifi_post_handler },
         { .uri = "/psk",          .method = HTTP_POST, .handler = psk_post_handler },

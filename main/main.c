@@ -46,6 +46,9 @@ static const char *source_str(time_source_t src)
 
 void app_main(void)
 {
+    /* Suppress noisy WiFi internal logs (ADDBA/DELBA negotiation) */
+    esp_log_level_set("wifi", ESP_LOG_WARN);
+
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, " RBIO_RTC — Facility Time Server");
     ESP_LOGI(TAG, "========================================");

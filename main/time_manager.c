@@ -19,6 +19,13 @@ static bool s_ntp_running = false;
  * Every 10 minutes is plenty for minute-level accuracy. */
 #define RESYNC_INTERVAL_SEC  600
 
+/* Only write DS3231 from NTP if drift exceeds this threshold.
+ * DS3231 drifts ~2ppm (~0.17s/day), so sub-second drift is normal. */
+#define NTP_RTC_DRIFT_THRESHOLD_SEC  2
+
+/* NTP polling interval: 6 hours. DS3231 drift at 6h is ~0.04s — negligible. */
+#define NTP_POLL_INTERVAL_MS  (6 * 60 * 60 * 1000)
+
 /* NVS key to persist "RTC has been set by NTP at least once" */
 #define NVS_NAMESPACE  "rbio_rtc"
 #define NVS_KEY_RTC_SET "rtc_set"
@@ -131,24 +138,63 @@ time_source_t time_manager_get_source(void)
     return s_source;
 }
 
+/* Track whether we've already marked RTC as set in NVS (avoid repeat writes) */
+static bool s_rtc_marked = false;
+static bool s_rtc_marked_checked = false;
+
 /* Callback for ESP-IDF SNTP sync notification */
 static void ntp_sync_cb(struct timeval *tv)
 {
     ESP_LOGI(TAG, "NTP sync received: epoch=%lld", (long long)tv->tv_sec);
+    s_source = TIME_SRC_NTP;
 
-    /* Write NTP time to DS3231 — this is the ONLY path that writes the RTC */
-    struct tm t;
-    gmtime_r(&tv->tv_sec, &t);
-    esp_err_t err = ds3231_set_time(&t);
+    /* Check cached NVS state on first call */
+    if (!s_rtc_marked_checked) {
+        s_rtc_marked = time_manager_rtc_is_set();
+        s_rtc_marked_checked = true;
+    }
+
+    /* Read DS3231 to check drift before deciding to write */
+    struct tm rtc_time;
+    esp_err_t err = ds3231_get_time(&rtc_time);
     if (err == ESP_OK) {
-        s_source = TIME_SRC_NTP;
-        mark_rtc_set();
-        ds3231_clear_osf();  /* battery is good — clear any stale OSF */
-        ESP_LOGI(TAG, "DS3231 updated from NTP: %04d-%02d-%02d %02d:%02d:%02d",
-                 t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
-                 t.tm_hour, t.tm_min, t.tm_sec);
+        time_t rtc_epoch = mktime(&rtc_time);
+        int drift = abs((int)(tv->tv_sec - rtc_epoch));
+
+        if (drift > NTP_RTC_DRIFT_THRESHOLD_SEC) {
+            /* Drift exceeds threshold — write NTP time to DS3231 */
+            struct tm ntp_tm;
+            gmtime_r(&tv->tv_sec, &ntp_tm);
+            err = ds3231_set_time(&ntp_tm);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "DS3231 updated from NTP (drift was %ds)", drift);
+                if (!s_rtc_marked) {
+                    mark_rtc_set();
+                    s_rtc_marked = true;
+                }
+            } else {
+                ESP_LOGE(TAG, "Failed to write DS3231: %s", esp_err_to_name(err));
+            }
+        } else {
+            ESP_LOGI(TAG, "DS3231 drift %ds within threshold, skipping write", drift);
+        }
     } else {
-        ESP_LOGE(TAG, "Failed to write NTP time to DS3231: %s", esp_err_to_name(err));
+        /* Can't read DS3231 — write unconditionally as fallback */
+        ESP_LOGW(TAG, "DS3231 read failed, writing unconditionally");
+        struct tm ntp_tm;
+        gmtime_r(&tv->tv_sec, &ntp_tm);
+        ds3231_set_time(&ntp_tm);
+        if (!s_rtc_marked) {
+            mark_rtc_set();
+            s_rtc_marked = true;
+        }
+    }
+
+    /* Only clear OSF if it's actually set */
+    bool osf = false;
+    if (ds3231_get_osf(&osf) == ESP_OK && osf) {
+        ds3231_clear_osf();
+        ESP_LOGI(TAG, "Cleared stale OSF flag");
     }
 }
 
@@ -170,10 +216,12 @@ esp_err_t time_manager_start_ntp(void)
     }
 
     sntp_set_time_sync_notification_cb(ntp_sync_cb);
+    sntp_set_sync_interval(NTP_POLL_INTERVAL_MS);
     esp_sntp_init();
     s_ntp_running = true;
 
-    ESP_LOGI(TAG, "NTP client started (polling mode)");
+    ESP_LOGI(TAG, "NTP client started (poll every %luh)",
+             (unsigned long)(NTP_POLL_INTERVAL_MS / 3600000));
     return ESP_OK;
 }
 
