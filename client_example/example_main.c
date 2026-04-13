@@ -5,7 +5,9 @@
  * system clock. Works on any ESP32.
  *
  * Wiring: none required (ESP-NOW is wireless).
- * WiFi:   must be initialized in any mode before calling client_init.
+ * WiFi:   must be initialized in STA mode but NOT connected to an AP.
+ *         The client scans all WiFi channels autonomously to find
+ *         the server — no channel pre-configuration needed.
  *
  * ── Usage ────────────────────────────────────────────────────────
  *
@@ -15,6 +17,16 @@
  *   Signed mode (only trusts servers with matching PSK):
  *     uint8_t psk[32] = { 0xaa, 0xbb, ... };  // copy from server web UI
  *     rbio_rtc_client_init(psk, on_time_received);
+ *
+ * ── What Happens ─────────────────────────────────────────────────
+ *
+ *   1. rbio_rtc_client_init() returns immediately (non-blocking).
+ *   2. A background task scans channels 1-13, sending a request on
+ *      each channel and listening for ~150ms.
+ *   3. When the server responds, the client locks to that channel.
+ *   4. The callback fires with the time data.
+ *   5. Subsequent beacons arrive every 5 seconds on the locked channel.
+ *   6. If beacons stop for 30 seconds, the client re-scans automatically.
  */
 
 #include "rbio_rtc_client.h"
@@ -69,8 +81,14 @@ static void on_time_received(const rbio_time_t *t)
 
 static void init_wifi_sta_minimal(void)
 {
-    /* Minimal WiFi init — STA mode, not connected to any AP.
-     * ESP-NOW works without being associated to an AP. */
+    /*
+     * Minimal WiFi init — STA mode, NOT connected to any AP.
+     * This is required for channel scanning to work: the client
+     * needs control over esp_wifi_set_channel(), which is only
+     * possible when the STA is unassociated.
+     *
+     * Do NOT call esp_wifi_connect() here.
+     */
     nvs_flash_init();
     esp_netif_init();
     esp_event_loop_create_default();
@@ -86,21 +104,18 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "RBIO_RTC Client Example");
 
-    /* 1. Init WiFi (required for ESP-NOW) */
+    /* 1. Init WiFi — STA mode, unassociated (required for channel scanning) */
     init_wifi_sta_minimal();
 
-    /* 2. Init RBIO_RTC client */
+    /* 2. Init RBIO_RTC client — starts channel scanning in background */
     esp_err_t err = rbio_rtc_client_init(MY_PSK, on_time_received);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Client init failed: %s", esp_err_to_name(err));
         return;
     }
 
-    /* 3. Optionally request time immediately instead of waiting
-     *    for the next broadcast (pass NULL for broadcast request) */
-    rbio_rtc_client_request(NULL);
-
-    /* 4. That's it — the callback fires every time a beacon arrives.
+    /* 3. That's it — the background scanner finds the server's channel,
+     *    locks to it, and the callback fires with time data.
      *    Your main loop can do whatever else it needs to. */
-    ESP_LOGI(TAG, "Listening for RBIO_RTC beacons...");
+    ESP_LOGI(TAG, "Waiting for RBIO_RTC server (scanning channels)...");
 }
