@@ -4,13 +4,15 @@ A single ESP32 + DS3231 that becomes the time authority for your entire facility
 
 ---
 
-## Migration Notice: Client Update (2026-04-13)
+## Migration Notice: Client Updates (2026-04-13)
 
-**If you implemented a client against the original codebase (before commit `b871f5f`), please read this section.** Existing integrations will still compile but may only work if the client happens to boot on the same WiFi channel as the server.
+**If you implemented a client against the original codebase, please read this section.** There have been two client updates.
 
 ### What changed
 
-**Channel discovery is now automatic.** The client scans all WiFi channels on init and locks to whichever one the server is broadcasting on. Previously, the client listened on whatever channel the WiFi stack defaulted to (usually channel 1), which silently failed if the server's router was on a different channel.
+**1. Channel discovery is now automatic** (commit `b871f5f`). The client scans all WiFi channels on init and locks to whichever one the server is broadcasting on. Previously, the client listened on whatever channel the WiFi stack defaulted to (usually channel 1), which silently failed if the server's router was on a different channel.
+
+**2. `rbio_rtc_client_deinit()` added + sync-once usage pattern clarified.** The beacon system is designed for periodic check-ins (boot + every 6-24 hours), not continuous listening. The new `rbio_rtc_client_deinit()` API lets you cleanly tear down the client after getting time, freeing the radio for WiFi/BLE/deep sleep. If you've been leaving the client running indefinitely, switch to the sync-once pattern — see [example_main.c](client_example/example_main.c) and the "Client Usage Philosophy" section below.
 
 **Secondary fix:** The client's HMAC verification used `mbedtls_md_hmac()`, which is a private API in ESP-IDF v6.0's mbedtls 4.x and will fail to compile. The new client uses a manual HMAC-SHA256 implementation instead.
 
@@ -196,18 +198,31 @@ Connect to the "RBIO_RTC" WiFi AP and query `192.168.4.1:123`. This works withou
 
 ESP-NOW beacons are broadcast every 5 seconds. ESP32 clients receive time without joining any WiFi network — no association, no password, no connection limit.
 
-**Unsigned mode (zero-config):**
+**Recommended pattern — sync once, then free the radio:**
 ```c
 #include "rbio_rtc_client.h"
 
-void on_time(const rbio_time_t *t) {
+static SemaphoreHandle_t s_sync_done;
+
+static void on_time(const rbio_time_t *t) {
     struct timeval tv = { .tv_sec = t->epoch, .tv_usec = t->ms * 1000 };
     settimeofday(&tv, NULL);
+    xSemaphoreGive(s_sync_done);
+}
+
+void sync_time_from_rbio(void) {
+    s_sync_done = xSemaphoreCreateBinary();
+    rbio_rtc_client_init(NULL, on_time);
+    xSemaphoreTake(s_sync_done, pdMS_TO_TICKS(10000));  // 10s timeout
+    rbio_rtc_client_deinit();
+    vSemaphoreDelete(s_sync_done);
 }
 
 void app_main(void) {
-    // init WiFi in any mode first...
-    rbio_rtc_client_init(NULL, on_time);
+    // init WiFi (STA, unassociated) ...
+    sync_time_from_rbio();
+    // Radio is free now. Do your work.
+    // Re-sync every 6-24 hours as drift tolerance requires.
 }
 ```
 
@@ -217,7 +232,28 @@ uint8_t psk[32] = { /* copy from server web UI */ };
 rbio_rtc_client_init(psk, on_time);
 ```
 
-The client reference implementation is in the `client_example/` directory. Copy `rbio_rtc_client.h` and `rbio_rtc_client.c` into your project.
+The client reference implementation is in the `client_example/` directory. Copy `rbio_rtc_client.h` and `rbio_rtc_client.c` into your project. See [example_main.c](client_example/example_main.c) for a complete working example with periodic re-sync.
+
+### Client Usage Philosophy: Sync-and-Disconnect, Not Live Listening
+
+The beacon system is designed for **periodic check-ins** — not a constant radio connection. Think of it like NTP: you sync on boot and occasionally afterward, not continuously.
+
+**When to sync:**
+- On boot (internal RTC is lost on power cycle)
+- Periodically, based on your drift tolerance:
+  - **Minute-level accuracy:** every 24 hours (ESP32 drifts ~1.7s/day)
+  - **Second-level accuracy:** every 1-6 hours
+  - **Sub-second accuracy:** not really this device's purpose — use NTP on a wired server
+
+**Why not leave the client running?**
+- The radio draws ~80mA active — kills battery life on anything portable
+- The radio is tied up — can't use WiFi, BLE, or ESP-NOW for other peers
+- Listening continuously provides no value — facility time doesn't change faster than your crystal drifts
+
+**The recommended flow:**
+1. Power on → `rbio_rtc_client_init()` → wait for callback (~1 second) → `rbio_rtc_client_deinit()`
+2. Do your application work using the system clock
+3. Set a timer or RTC alarm to repeat step 1 every 6-24 hours
 
 ## Which Method Should I Use?
 

@@ -8,20 +8,70 @@
  *
  * Supports both v1 (unsigned) and v2 (HMAC-SHA256 signed) beacons.
  *
- * ── Quick Start ──────────────────────────────────────────────────
+ * ── Intended Usage Pattern ───────────────────────────────────────
+ *
+ *   This is a SYNC-AND-DISCONNECT client, not a live time feed.
+ *
+ *   The beacon system exists so your device can check in with the
+ *   facility time server occasionally — on boot and periodically
+ *   afterward — NOT to maintain a constant radio connection.
+ *
+ *   Typical flow:
+ *     1. On boot, call rbio_rtc_client_init() to get current time.
+ *     2. Wait for the callback to fire (usually <1 second).
+ *     3. Set your system clock from the received time.
+ *     4. Call rbio_rtc_client_deinit() to free the radio.
+ *     5. Do your application work using the system clock.
+ *     6. Every 6-24 hours (as drift tolerance dictates), repeat.
+ *
+ *   Why not leave the client running?
+ *     - The radio stays active at ~80mA, killing battery life.
+ *     - The radio is tied up — can't be used for WiFi, BLE, etc.
+ *     - Listening continuously provides no value — facility time
+ *       doesn't change faster than your crystal drifts.
+ *
+ *   The ESP32's internal RTC (accurate to ~20ppm) drifts ~1.7 seconds
+ *   per day. If your application needs minute-level accuracy, sync
+ *   once every 24 hours. For second-level accuracy, sync every 1-6
+ *   hours. Set up a FreeRTOS timer or RTC alarm to trigger re-sync.
+ *
+ * ── Quick Start (recommended sync-once pattern) ──────────────────
  *
  *   #include "rbio_rtc_client.h"
+ *   #include <sys/time.h>
+ *
+ *   static SemaphoreHandle_t s_sync_done;
+ *
+ *   static void on_time(const rbio_time_t *t) {
+ *       struct timeval tv = { .tv_sec = t->epoch, .tv_usec = t->ms*1000 };
+ *       settimeofday(&tv, NULL);
+ *       xSemaphoreGive(s_sync_done);
+ *   }
+ *
+ *   void sync_time_from_rbio(void) {
+ *       s_sync_done = xSemaphoreCreateBinary();
+ *       rbio_rtc_client_init(NULL, on_time);
+ *       xSemaphoreTake(s_sync_done, pdMS_TO_TICKS(10000));  // 10s timeout
+ *       rbio_rtc_client_deinit();
+ *       vSemaphoreDelete(s_sync_done);
+ *   }
  *
  *   void app_main(void) {
  *       // ... init WiFi in STA mode (don't connect to any AP) ...
- *       rbio_rtc_client_init(NULL, my_time_callback);
- *       // That's it — channel scanning and beacon reception happen
- *       // automatically in the background.
+ *       sync_time_from_rbio();
+ *       // Radio is now free for other uses. System clock is set.
+ *       // Schedule periodic re-sync as your drift tolerance requires.
  *   }
  *
- *   void my_time_callback(const rbio_time_t *time) {
- *       printf("Time: %lu, verified: %d\n", time->epoch, time->verified);
- *   }
+ * ── Continuous-Listening Pattern (if you really need it) ─────────
+ *
+ *   If your device has no power constraints and never needs the
+ *   radio for anything else, you can just leave the client running:
+ *
+ *     rbio_rtc_client_init(NULL, on_time);
+ *     // Callback fires every 5 seconds forever.
+ *
+ *   Most devices should prefer the sync-once pattern above.
  *
  * ── Channel Scanning ────────────────────────────────────────────
  *
@@ -135,3 +185,14 @@ esp_err_t rbio_rtc_client_init(const uint8_t *psk, rbio_time_cb_t cb);
  *                    Pass NULL to use broadcast (any server will respond).
  */
 esp_err_t rbio_rtc_client_request(const uint8_t *server_mac);
+
+/**
+ * Shut down the client cleanly: stop the scan task, deinit ESP-NOW,
+ * free resources. After this call, the radio is available for other
+ * uses (WiFi connect, BLE, deep sleep, etc.).
+ *
+ * Safe to call rbio_rtc_client_init() again later to re-sync.
+ *
+ * Returns ESP_ERR_INVALID_STATE if the client was not initialized.
+ */
+esp_err_t rbio_rtc_client_deinit(void);

@@ -42,6 +42,7 @@ static const char *TAG = "rbio_client";
 #define SCAN_TASK_PRIO         5
 
 #define EVT_BEACON_FOUND       BIT0
+#define EVT_STOP_REQUESTED     BIT1
 
 /* ── Scanner state ──────────────────────────────────────────────── */
 
@@ -249,6 +250,13 @@ static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int le
 
 /* ── Channel scanner task ───────────────────────────────────────── */
 
+/* Check if a stop has been requested (non-blocking) */
+static bool stop_requested(void)
+{
+    EventBits_t bits = xEventGroupGetBits(s_scan.events);
+    return (bits & EVT_STOP_REQUESTED) != 0;
+}
+
 static void scan_task(void *arg)
 {
     /* Add broadcast peer for active probing */
@@ -263,7 +271,7 @@ static void scan_task(void *arg)
 
     uint8_t req_byte = s_has_psk ? 0x02 : 0x01;
 
-    for (;;) {
+    while (!stop_requested()) {
         switch (s_scan.state) {
 
         case SCAN_SCANNING: {
@@ -273,6 +281,8 @@ static void scan_task(void *arg)
                      s_scan.chan_start + s_scan.chan_count - 1);
 
             for (uint8_t i = 0; i < s_scan.chan_count && !found; i++) {
+                if (stop_requested()) goto exit_task;
+
                 uint8_t ch = s_scan.chan_start + i;
                 esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
 
@@ -280,11 +290,14 @@ static void scan_task(void *arg)
                 esp_now_send(broadcast, &req_byte, 1);
 
                 EventBits_t bits = xEventGroupWaitBits(
-                    s_scan.events, EVT_BEACON_FOUND,
-                    pdTRUE, pdFALSE,
+                    s_scan.events, EVT_BEACON_FOUND | EVT_STOP_REQUESTED,
+                    pdFALSE, pdFALSE,
                     pdMS_TO_TICKS(SCAN_DWELL_MS));
 
+                if (bits & EVT_STOP_REQUESTED) goto exit_task;
+
                 if (bits & EVT_BEACON_FOUND) {
+                    xEventGroupClearBits(s_scan.events, EVT_BEACON_FOUND);
                     s_scan.locked_channel = ch;
                     s_scan.state = SCAN_LOCKED;
                     s_scan.backoff_ms = SCAN_BACKOFF_INIT_MS;
@@ -303,10 +316,14 @@ static void scan_task(void *arg)
 
         case SCAN_LOCKED: {
             EventBits_t bits = xEventGroupWaitBits(
-                s_scan.events, EVT_BEACON_FOUND,
-                pdTRUE, pdFALSE,
+                s_scan.events, EVT_BEACON_FOUND | EVT_STOP_REQUESTED,
+                pdFALSE, pdFALSE,
                 pdMS_TO_TICKS(1000));
-            (void)bits;
+
+            if (bits & EVT_STOP_REQUESTED) goto exit_task;
+            if (bits & EVT_BEACON_FOUND) {
+                xEventGroupClearBits(s_scan.events, EVT_BEACON_FOUND);
+            }
 
             int64_t elapsed_us = esp_timer_get_time() - s_scan.last_beacon_us;
             if (elapsed_us > (int64_t)SCAN_BEACON_TIMEOUT_S * 1000000) {
@@ -318,8 +335,13 @@ static void scan_task(void *arg)
             break;
         }
 
-        case SCAN_BACKOFF:
-            vTaskDelay(pdMS_TO_TICKS(s_scan.backoff_ms));
+        case SCAN_BACKOFF: {
+            EventBits_t bits = xEventGroupWaitBits(
+                s_scan.events, EVT_STOP_REQUESTED,
+                pdFALSE, pdFALSE,
+                pdMS_TO_TICKS(s_scan.backoff_ms));
+            if (bits & EVT_STOP_REQUESTED) goto exit_task;
+
             if (s_scan.backoff_ms < SCAN_BACKOFF_MAX_MS) {
                 s_scan.backoff_ms *= 2;
                 if (s_scan.backoff_ms > SCAN_BACKOFF_MAX_MS) {
@@ -329,7 +351,13 @@ static void scan_task(void *arg)
             s_scan.state = SCAN_SCANNING;
             break;
         }
+        }
     }
+
+exit_task:
+    ESP_LOGI(TAG, "Scan task exiting");
+    s_scan.task_handle = NULL;
+    vTaskDelete(NULL);
 }
 
 /* ── Public API ─────────────────────────────────────────────────── */
@@ -415,4 +443,35 @@ esp_err_t rbio_rtc_client_request(const uint8_t *server_mac)
 
     uint8_t req = s_has_psk ? 0x02 : 0x01;
     return esp_now_send(target, &req, 1);
+}
+
+esp_err_t rbio_rtc_client_deinit(void)
+{
+    if (!s_scan.events) return ESP_ERR_INVALID_STATE;
+
+    /* Signal scan task to exit */
+    xEventGroupSetBits(s_scan.events, EVT_STOP_REQUESTED);
+
+    /* Wait for task to self-delete (it sets task_handle = NULL) */
+    for (int i = 0; i < 50 && s_scan.task_handle != NULL; i++) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    /* Tear down ESP-NOW */
+    esp_now_unregister_recv_cb();
+    esp_now_deinit();
+
+    /* Clean up event group */
+    vEventGroupDelete(s_scan.events);
+    s_scan.events = NULL;
+
+    /* Reset state so a future init() starts clean */
+    s_callback = NULL;
+    s_has_psk = false;
+    s_last_seq = 0;
+    memset(&s_scan, 0, sizeof(s_scan));
+    memset(s_psk, 0, RBIO_PSK_LEN);
+
+    ESP_LOGI(TAG, "Client deinitialized");
+    return ESP_OK;
 }
