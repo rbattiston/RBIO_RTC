@@ -2,6 +2,81 @@
 
 A single ESP32 + DS3231 that becomes the time authority for your entire facility. Every device gets consistent, reliable time — no per-device RTC modules, no internet dependency after initial sync.
 
+---
+
+## Migration Notice: Client Update (2026-04-13)
+
+**If you implemented a client against the original codebase (before commit `b871f5f`), please read this section.** Existing integrations will still compile but may only work if the client happens to boot on the same WiFi channel as the server.
+
+### What changed
+
+**Channel discovery is now automatic.** The client scans all WiFi channels on init and locks to whichever one the server is broadcasting on. Previously, the client listened on whatever channel the WiFi stack defaulted to (usually channel 1), which silently failed if the server's router was on a different channel.
+
+**Secondary fix:** The client's HMAC verification used `mbedtls_md_hmac()`, which is a private API in ESP-IDF v6.0's mbedtls 4.x and will fail to compile. The new client uses a manual HMAC-SHA256 implementation instead.
+
+### What you need to do
+
+**For most integrations — nothing in your code.** The public API is unchanged:
+
+```c
+rbio_rtc_client_init(psk, callback);  // same signature
+rbio_rtc_client_request(mac);          // same signature
+```
+
+Just replace the two files in [client_example/](client_example/):
+- `rbio_rtc_client.h`
+- `rbio_rtc_client.c`
+
+### One behavioral constraint to verify
+
+The new client requires that your WiFi STA is **not connected to any AP** when calling `rbio_rtc_client_init()`. Channel scanning needs control of the radio, which it can't have if the STA is associated.
+
+If your code does this, you're fine (this is the standard pattern):
+```c
+esp_wifi_set_mode(WIFI_MODE_STA);
+esp_wifi_start();
+rbio_rtc_client_init(NULL, on_time);  // OK
+```
+
+If your code does this, you need to restructure:
+```c
+esp_wifi_set_mode(WIFI_MODE_STA);
+esp_wifi_start();
+esp_wifi_connect();                    // ← this breaks channel scanning
+rbio_rtc_client_init(NULL, on_time);   // ← will not find server
+```
+
+Three resolution options:
+1. **Get time first, connect to WiFi after.** Call `rbio_rtc_client_init()` before `esp_wifi_connect()`. Once the callback fires with valid time, you can connect to your AP normally.
+2. **Connect to the same router as the RBIO_RTC server.** You'll be on the same channel, so no scanning is needed — beacons arrive on your associated channel.
+3. **Skip ESP-NOW, use SNTP.** If your device will be connected to the LAN anyway, point a standard NTP client at the server's STA IP (visible on the server's web UI).
+
+### Observable behavioral changes
+
+- `rbio_rtc_client_init()` now spawns a background scan task (stack: 3072 bytes, priority: 5). Returns immediately as before.
+- First callback now fires within ~300ms to 6 seconds after init (depending on which channel the server is on). Previously it fired immediately if you were lucky with channels, never if unlucky.
+- A new harmless log line may appear: `W ESPNOW: Peer exists` when `rbio_rtc_client_request()` is called after the scanner has already added the broadcast peer. Ignorable.
+- New log lines during scanning: `Scanning channels 1-13...`, `Beacon found on channel N, locked`. Set the `rbio_client` log tag to `ESP_LOG_WARN` to suppress if desired.
+
+### What did not change
+
+- Beacon protocol (v1 and v2 wire formats are identical)
+- PSK format (32 bytes)
+- Callback signature and `rbio_time_t` struct fields
+- HMAC algorithm (still HMAC-SHA256 truncated to 20 bytes)
+- Replay protection semantics (monotonic sequence numbers)
+- Server-side code (server broadcasts are unchanged; it answers requests as before)
+
+### Quick compatibility check
+
+If your existing client currently works reliably, one of these is true:
+1. You happen to be on the same channel as the server (likely because your client's WiFi STA connects to the same router). You're fine either way — the update won't break you, and gives you resilience if the server later moves to a different router.
+2. You compile against ESP-IDF 5.x where `mbedtls_md_hmac()` was still public. The update is still recommended for ESP-IDF 6.0 readiness.
+
+If your existing client intermittently fails or fails in some deployments but not others, that's the channel mismatch problem and this update fixes it.
+
+---
+
 ## The Problem
 
 You're building multiple devices that need to know the time. Adding a DS3231 to each one is expensive, tedious, and creates a synchronization nightmare — every RTC drifts independently. Connecting each device to the internet for NTP isn't always possible in workshops, labs, or industrial environments.
