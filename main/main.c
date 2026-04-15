@@ -30,6 +30,7 @@
 #include "repeater.h"
 
 #include "esp_log.h"
+#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <time.h>
@@ -54,6 +55,16 @@ void app_main(void)
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, " RBIO_RTC — Facility Time Server");
     ESP_LOGI(TAG, "========================================");
+
+    /* NVS must be initialized BEFORE any module reads from it.
+     * mesh_role_get(), time_manager NVS accessors, and wifi_manager
+     * all depend on NVS. This was previously only initialized inside
+     * wifi_manager_init(), which ran too late for the role read. */
+    esp_err_t nvs_err = nvs_flash_init();
+    if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
 
     /* Determine role from NVS */
     mesh_role_t role = mesh_role_get();

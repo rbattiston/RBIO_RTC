@@ -91,6 +91,11 @@ static const char INDEX_HTML[] =
 "<input type='password' name='pass' maxlength='63'>"
 "<button type='submit'>Connect</button>"
 "</form>"
+"<form method='POST' action='/wifi/forget' style='margin-top:-8px'>"
+"<button type='submit' class='btn-warn'>Forget Saved WiFi</button>"
+"<p class='note'>Erases stored router credentials. Required before "
+"switching this device to REPEATER mode if it was previously connected.</p>"
+"</form>"
 "<h2>ESP-NOW Pre-Shared Key</h2>"
 "<form method='POST' action='/psk'>"
 "<label>PSK (64 hex characters = 32 bytes)</label>"
@@ -232,6 +237,11 @@ static esp_err_t index_get_handler(httpd_req_t *req)
             if (httpd_query_key_value(buf, "role", val, sizeof(val)) == ESP_OK) {
                 snprintf(msg_html, sizeof(msg_html),
                          "<div class='msg ok'>Role saved. Reboot the device for changes to take effect.</div>");
+            }
+            if (httpd_query_key_value(buf, "wifi", val, sizeof(val)) == ESP_OK
+                && strcmp(val, "forgotten") == 0) {
+                snprintf(msg_html, sizeof(msg_html),
+                         "<div class='msg warn'>WiFi credentials erased. Device is no longer connected to a router.</div>");
             }
         }
         free(buf);
@@ -405,6 +415,22 @@ static esp_err_t psk_generate_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── POST /wifi/forget ── erase saved STA credentials ───────────── */
+
+static esp_err_t wifi_forget_handler(httpd_req_t *req)
+{
+    /* No body needed — the action is unconditional */
+    char body[16];
+    httpd_req_recv(req, body, sizeof(body) - 1);  /* drain, ignore */
+
+    wifi_manager_forget_sta_creds();
+
+    httpd_resp_set_status(req, "303 See Other");
+    httpd_resp_set_hdr(req, "Location", "/?wifi=forgotten");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
 /* ── POST /role ── set mesh role (root or repeater) ──────────────── */
 
 static esp_err_t role_post_handler(httpd_req_t *req)
@@ -516,7 +542,7 @@ esp_err_t http_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 12;
 
     httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config);
@@ -529,6 +555,7 @@ esp_err_t http_server_start(void)
         { .uri = "/favicon.ico",  .method = HTTP_GET,  .handler = favicon_handler },
         { .uri = "/",             .method = HTTP_GET,  .handler = index_get_handler },
         { .uri = "/wifi",         .method = HTTP_POST, .handler = wifi_post_handler },
+        { .uri = "/wifi/forget",  .method = HTTP_POST, .handler = wifi_forget_handler },
         { .uri = "/psk",          .method = HTTP_POST, .handler = psk_post_handler },
         { .uri = "/psk/generate", .method = HTTP_GET,  .handler = psk_generate_handler },
         { .uri = "/role",         .method = HTTP_POST, .handler = role_post_handler },

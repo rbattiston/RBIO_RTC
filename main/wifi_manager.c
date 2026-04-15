@@ -311,6 +311,31 @@ esp_err_t wifi_manager_set_sta_creds(const char *ssid, const char *password)
     return connect_sta();
 }
 
+esp_err_t wifi_manager_forget_sta_creds(void)
+{
+    /* Erase from NVS */
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_erase_key(h, NVS_KEY_STA_SSID);
+        nvs_erase_key(h, NVS_KEY_STA_PASS);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+
+    /* Clear in-memory state and disconnect */
+    s_sta_ssid[0] = '\0';
+    s_sta_ip[0] = '\0';
+    s_sta_connected = false;
+    s_retry_count = MAX_RETRY_COUNT;  /* stop auto-reconnect in event handler */
+    esp_wifi_disconnect();
+
+    /* Stop any running NTP sync since we no longer have upstream */
+    time_manager_stop_ntp();
+
+    ESP_LOGI(TAG, "STA credentials forgotten");
+    return ESP_OK;
+}
+
 bool wifi_manager_has_sta_creds(void)
 {
     return s_sta_ssid[0] != '\0';

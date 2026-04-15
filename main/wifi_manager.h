@@ -38,6 +38,12 @@ esp_err_t wifi_manager_lock_ap_channel(uint8_t channel);
 esp_err_t wifi_manager_set_sta_creds(const char *ssid, const char *password);
 
 /**
+ * Erase STA credentials from NVS and disconnect the current STA session.
+ * Does not reboot — takes effect immediately (STA stops connecting).
+ */
+esp_err_t wifi_manager_forget_sta_creds(void);
+
+/**
  * Check if STA credentials are configured.
  */
 bool wifi_manager_has_sta_creds(void);
