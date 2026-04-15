@@ -15,10 +15,13 @@
 
 static const char *TAG = "wifi_mgr";
 
-#define RBIO_AP_SSID       "RBIO_RTC"
-#define RBIO_AP_PASSWORD   "rbio_time"
-#define RBIO_AP_CHANNEL    1
-#define RBIO_AP_MAX_STA    8
+#define RBIO_AP_SSID_PREFIX "RBIO_RTC_"
+#define RBIO_AP_PASSWORD    "rbio_time"
+#define RBIO_AP_CHANNEL     1
+#define RBIO_AP_MAX_STA     8
+
+/* SSID = "RBIO_RTC_" + last 5 hex chars of MAC = 14 chars */
+#define RBIO_AP_SSID_LEN  14
 
 #define NVS_NAMESPACE      "rbio_wifi"
 #define NVS_KEY_STA_SSID   "sta_ssid"
@@ -33,11 +36,23 @@ static const char *TAG = "wifi_mgr";
 #define AP_KICK_CHECK_SEC      10
 
 static char s_ap_ip[16]   = "192.168.4.1";
+static char s_ap_ssid[RBIO_AP_SSID_LEN + 1] = "";  /* built from MAC at init */
 static char s_sta_ip[16]  = "";
 static char s_sta_ssid[33] = "";
 static bool s_sta_connected = false;
 static int  s_retry_count = 0;
 static esp_netif_t *s_sta_netif = NULL;
+
+/* Build "RBIO_RTC_XXXXX" from last 5 hex chars of our AP MAC */
+static void build_ap_ssid(void)
+{
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
+    /* Last 5 hex chars = last 2.5 bytes = nibble of mac[3] + mac[4] + mac[5] */
+    snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s%x%02x%02x",
+             RBIO_AP_SSID_PREFIX,
+             mac[3] & 0x0F, mac[4], mac[5]);
+}
 
 /* Track when each AP client connected (by MAC) */
 #define AP_CLIENT_SLOTS  10
@@ -227,24 +242,27 @@ esp_err_t wifi_manager_init(bool repeater_mode)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL, NULL));
 
+    /* Build per-device SSID from MAC: "RBIO_RTC_XXXXX" */
+    build_ap_ssid();
+
     /* AP config */
     wifi_config_t ap_cfg = {
         .ap = {
-            .ssid           = RBIO_AP_SSID,
             .password       = RBIO_AP_PASSWORD,
-            .ssid_len       = sizeof(RBIO_AP_SSID) - 1,
+            .ssid_len       = strlen(s_ap_ssid),
             .channel        = RBIO_AP_CHANNEL,
             .authmode       = WIFI_AUTH_WPA2_PSK,
             .max_connection = RBIO_AP_MAX_STA,
         },
     };
+    memcpy(ap_cfg.ap.ssid, s_ap_ssid, strlen(s_ap_ssid));
 
     /* Always run AP+STA so we can serve time AND reach NTP */
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "AP started — SSID: %s, IP: %s", RBIO_AP_SSID, s_ap_ip);
+    ESP_LOGI(TAG, "AP started — SSID: %s, IP: %s", s_ap_ssid, s_ap_ip);
 
     /* Root: connect STA to router if creds exist.
      * Repeater: STA stays unassociated (channel scanning needs the radio). */
@@ -316,6 +334,11 @@ const char *wifi_manager_get_sta_ip(void)
 const char *wifi_manager_get_sta_ssid(void)
 {
     return s_sta_ssid;
+}
+
+const char *wifi_manager_get_ap_ssid(void)
+{
+    return s_ap_ssid;
 }
 
 esp_err_t wifi_manager_lock_ap_channel(uint8_t channel)

@@ -31,7 +31,7 @@ static const char *source_str(time_source_t src)
 static const char INDEX_HTML[] =
 "<!DOCTYPE html><html><head>"
 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-"<title>RBIO_RTC</title>"
+"<title>%s</title>"
 "<style>"
 "body{font-family:monospace;max-width:480px;margin:40px auto;padding:0 16px;background:#111;color:#eee}"
 "h1{color:#0af}h2{color:#888;font-size:14px;margin-top:24px}"
@@ -53,7 +53,7 @@ static const char INDEX_HTML[] =
 ".msg.warn{background:#fa02;border:1px solid #fa0}"
 ".note{color:#888;font-size:12px;margin-top:8px}"
 "</style></head><body>"
-"<h1>RBIO_RTC</h1>"
+"<h1>%s</h1>"
 "<h2>Facility Time Server</h2>"
 "<div class='status'>"
 "<div><span class='label'>Time: </span><span>%s</span></div>"
@@ -240,7 +240,11 @@ static esp_err_t index_get_handler(httpd_req_t *req)
     char *page = malloc(sizeof(INDEX_HTML) + 1024);
     if (!page) return ESP_ERR_NO_MEM;
 
+    const char *ap_ssid = wifi_manager_get_ap_ssid();
+
     int len = snprintf(page, sizeof(INDEX_HTML) + 1024, INDEX_HTML,
+                       ap_ssid,      /* <title> */
+                       ap_ssid,      /* <h1> */
                        time_str,
                        src_class, source_str(src),
                        rtc_class, rtc_str,
@@ -456,7 +460,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 
     char json[768];
     int len = snprintf(json, sizeof(json),
-        "{\"time\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\","
+        "{\"device_ssid\":\"%s\","
+        "\"time\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\","
         "\"source\":\"%s\","
         "\"rtc_set\":%s,"
         "\"battery_ok\":%s,"
@@ -472,6 +477,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"stratum\":%u,"
         "\"parent_mac\":%s,"
         "\"parent_rssi\":%d}",
+        wifi_manager_get_ap_ssid(),
         t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
         t.tm_hour, t.tm_min, t.tm_sec,
         source_str(time_manager_get_source()),

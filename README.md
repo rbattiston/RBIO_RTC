@@ -154,7 +154,7 @@ idf.py -p COMx monitor  # optional: watch boot log
 ## First-Time Setup
 
 1. **Flash the firmware** and power up the device.
-2. **Connect to the "RBIO_RTC" WiFi network** (password: `rbio_time`) from your phone or laptop.
+2. **Connect to the "RBIO_RTC_XXXXX" WiFi network** (password: `rbio_time`) from your phone or laptop. The `XXXXX` is the last 5 hex digits of the device's MAC address, so each physical device has a unique SSID. The device also blinks its identifier count in blue on the LED every ~12 seconds to help you match a specific device to its SSID.
 3. **Open `http://192.168.4.1`** in a browser.
 4. **Enter your router's SSID and password** and click Connect.
 5. The device connects to your router, reaches NTP servers, sets the DS3231, and starts serving time. Done.
@@ -192,7 +192,7 @@ NTP=192.168.1.50
 
 ### Option 2: NTP via the AP (direct connection)
 
-Connect to the "RBIO_RTC" WiFi AP and query `192.168.4.1:123`. This works without a router but is limited to 8 simultaneous WiFi clients (with a 30-second auto-disconnect to free slots). Best for initial setup and devices that sync infrequently.
+Connect to the "RBIO_RTC_XXXXX" WiFi AP (where XXXXX is the last 5 hex digits of the device's MAC) and query `192.168.4.1:123`. This works without a router but is limited to 8 simultaneous WiFi clients (with a 30-second auto-disconnect to free slots). Best for initial setup and devices that sync infrequently.
 
 ### Option 3: ESP-NOW (ESP32 devices only)
 
@@ -362,7 +362,7 @@ client_example/
 
 | Parameter | Value | Where to change |
 |-----------|-------|-----------------|
-| AP SSID | `RBIO_RTC` | `wifi_manager.c` |
+| AP SSID | `RBIO_RTC_<last5hexMAC>` | `wifi_manager.c` |
 | AP password | `rbio_time` | `wifi_manager.c` |
 | AP max clients | 8 | `wifi_manager.c` |
 | AP client timeout | 30 seconds | `wifi_manager.c` |

@@ -53,6 +53,12 @@ bool wifi_manager_sta_connected(void);
 const char *wifi_manager_get_ap_ip(void);
 
 /**
+ * Get the AP's SSID string. Built from the device MAC at init time:
+ * "RBIO_RTC_XXXXX" where XXXXX is the last 5 hex digits of the MAC.
+ */
+const char *wifi_manager_get_ap_ssid(void);
+
+/**
  * Get the STA's IP address string (empty if not connected).
  */
 const char *wifi_manager_get_sta_ip(void);

@@ -126,7 +126,7 @@ void app_main(void)
 
     ESP_LOGI(TAG, "  Role:     %s", mesh_role_str(role));
     ESP_LOGI(TAG, "  RTC set:  %s", time_manager_rtc_is_set() ? "Yes" : "No");
-    ESP_LOGI(TAG, "  AP:       RBIO_RTC (pass: rbio_time)");
+    ESP_LOGI(TAG, "  AP:       %s (pass: rbio_time)", wifi_manager_get_ap_ssid());
     ESP_LOGI(TAG, "  Config:   http://%s", wifi_manager_get_ap_ip());
     ESP_LOGI(TAG, "  SNTP:     %s:123", wifi_manager_get_ap_ip());
     ESP_LOGI(TAG, "  ESP-NOW:  broadcast every %ds", ESPNOW_BROADCAST_INTERVAL_SEC);
