@@ -8,6 +8,8 @@ idf_component_register(
         "espnow_time.c"
         "http_server.c"
         "status_led.c"
+        "mesh_role.c"
+        "repeater.c"
     INCLUDE_DIRS "."
     REQUIRES
         driver

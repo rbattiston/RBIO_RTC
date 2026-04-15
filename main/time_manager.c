@@ -1,5 +1,6 @@
 #include "time_manager.h"
 #include "ds3231.h"
+#include "espnow_time.h"  /* for ESPNOW_STRATUM_* constants */
 #include "esp_log.h"
 #include "esp_sntp.h"
 #include "nvs_flash.h"
@@ -14,6 +15,7 @@ static const char *TAG = "time_mgr";
 
 static time_source_t s_source = TIME_SRC_NONE;
 static bool s_ntp_running = false;
+static uint8_t s_stratum = ESPNOW_STRATUM_UNSYNCED;  /* start unsynced */
 
 /* How often to re-read DS3231 and correct system clock drift (seconds).
  * Every 10 minutes is plenty for minute-level accuracy. */
@@ -147,6 +149,8 @@ static void ntp_sync_cb(struct timeval *tv)
 {
     ESP_LOGI(TAG, "NTP sync received: epoch=%lld", (long long)tv->tv_sec);
     s_source = TIME_SRC_NTP;
+    /* NTP sync = root authority. Set stratum 0. */
+    time_manager_set_stratum(ESPNOW_STRATUM_ROOT);
 
     /* Check cached NVS state on first call */
     if (!s_rtc_marked_checked) {
@@ -232,4 +236,71 @@ void time_manager_stop_ntp(void)
         s_ntp_running = false;
         ESP_LOGI(TAG, "NTP client stopped");
     }
+}
+
+uint8_t time_manager_get_stratum(void)
+{
+    return s_stratum;
+}
+
+void time_manager_set_stratum(uint8_t stratum)
+{
+    if (stratum > ESPNOW_STRATUM_UNSYNCED) stratum = ESPNOW_STRATUM_UNSYNCED;
+    if (s_stratum != stratum) {
+        ESP_LOGI(TAG, "Stratum %u → %u", s_stratum, stratum);
+        s_stratum = stratum;
+    }
+}
+
+/* Root-side NTP sync callback already sets stratum 0 via set_stratum()
+ * when invoked. See ntp_sync_cb above. For the repeater path, this
+ * function is called by the scanner on every valid upstream beacon. */
+esp_err_t time_manager_espnow_sync(time_t epoch, uint16_t ms, uint8_t upstream_stratum)
+{
+    /* Upstream too far from root: can't help us */
+    if (upstream_stratum >= ESPNOW_STRATUM_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Loop prevention: only accept strictly lower stratum than ours
+     * (or equal if we're unsynced). */
+    if (s_stratum != ESPNOW_STRATUM_UNSYNCED && upstream_stratum >= s_stratum) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Set system clock */
+    struct timeval tv = {
+        .tv_sec = epoch,
+        .tv_usec = (suseconds_t)ms * 1000,
+    };
+    settimeofday(&tv, NULL);
+
+    /* Read DS3231 to check drift before deciding to write */
+    struct tm rtc_time;
+    if (ds3231_get_time(&rtc_time) == ESP_OK) {
+        time_t rtc_epoch = mktime(&rtc_time);
+        int drift = abs((int)(epoch - rtc_epoch));
+
+        if (drift > NTP_RTC_DRIFT_THRESHOLD_SEC) {
+            struct tm t;
+            gmtime_r(&epoch, &t);
+            if (ds3231_set_time(&t) == ESP_OK) {
+                ESP_LOGI(TAG, "DS3231 updated from ESP-NOW upstream (drift was %ds)", drift);
+                if (!time_manager_rtc_is_set()) {
+                    mark_rtc_set();
+                }
+            }
+        }
+    }
+
+    /* Clear any stale OSF flag */
+    bool osf = false;
+    if (ds3231_get_osf(&osf) == ESP_OK && osf) {
+        ds3231_clear_osf();
+    }
+
+    s_source = TIME_SRC_ESPNOW;
+    time_manager_set_stratum(upstream_stratum + 1);
+
+    return ESP_OK;
 }

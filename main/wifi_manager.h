@@ -17,8 +17,19 @@
 /**
  * Initialize WiFi in AP+STA mode. Starts AP immediately.
  * If STA credentials exist in NVS, begins connection attempts.
+ *
+ * Root nodes: pass false. Loads STA creds and auto-connects.
+ * Repeater nodes: pass true. STA stays unassociated so the
+ *   repeater can do channel scanning.
  */
-esp_err_t wifi_manager_init(void);
+esp_err_t wifi_manager_init(bool repeater_mode);
+
+/**
+ * Lock the AP channel to a specific value. Used by the repeater after
+ * it locks to an upstream so its downstream broadcasts match the mesh
+ * channel. Safe to call multiple times.
+ */
+esp_err_t wifi_manager_lock_ap_channel(uint8_t channel);
 
 /**
  * Save STA credentials to NVS and begin connecting.

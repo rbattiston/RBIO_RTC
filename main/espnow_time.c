@@ -1,10 +1,12 @@
 #include "espnow_time.h"
 #include "time_manager.h"
+#include "repeater.h"
 #include "esp_now.h"
 #include "esp_wifi.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
+#include "esp_random.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "mbedtls/md.h"
@@ -215,11 +217,12 @@ static void build_v1(uint8_t *buf)
     put_u16_be(&buf[5], ms);
     buf[7] = (uint8_t)time_manager_get_source();
     put_u32_be(&buf[8], uptime);
+    buf[12] = time_manager_get_stratum();
 
-    /* XOR checksum */
+    /* XOR checksum over bytes 0..12 */
     uint8_t cs = 0;
-    for (int i = 0; i < 12; i++) cs ^= buf[i];
-    buf[12] = cs;
+    for (int i = 0; i < 13; i++) cs ^= buf[i];
+    buf[13] = cs;
 }
 
 static bool build_v2(uint8_t *buf)
@@ -244,7 +247,7 @@ static bool build_v2(uint8_t *buf)
     /* HMAC-SHA256 over bytes 0..15, truncated to 20 bytes */
     compute_hmac(buf, 16, s_psk, ESPNOW_PSK_LEN, &buf[16], ESPNOW_HMAC_LEN);
 
-    buf[36] = 0x00;  /* reserved */
+    buf[36] = time_manager_get_stratum();
     return true;
 }
 
@@ -253,6 +256,13 @@ static bool build_v2(uint8_t *buf)
 static void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int len)
 {
     if (len < 1) return;
+
+    /* If this is a beacon (not a request), hand it to the repeater module.
+     * Requests are always 1 byte; beacons are ≥13 bytes. */
+    if (len > 1) {
+        repeater_on_beacon(info, data, len);
+        return;
+    }
 
     bool want_v2 = (data[0] == ESPNOW_TIME_REQ_V2);
     bool want_v1 = (data[0] == ESPNOW_TIME_REQ_V1);
@@ -329,20 +339,26 @@ esp_err_t espnow_time_init(void)
 static void broadcast_task(void *arg)
 {
     for (;;) {
-        /* Always send v1 (unsigned) for backwards compatibility */
-        uint8_t v1[ESPNOW_V1_LEN];
-        build_v1(v1);
-        esp_now_send(BROADCAST_MAC, v1, sizeof(v1));
+        /* Only broadcast if we have a valid time sync (stratum <= MAX).
+         * An unsynced node (stratum 7) must not pollute the mesh. */
+        uint8_t stratum = time_manager_get_stratum();
+        if (stratum <= ESPNOW_STRATUM_MAX) {
+            uint8_t v1[ESPNOW_V1_LEN];
+            build_v1(v1);
+            esp_now_send(BROADCAST_MAC, v1, sizeof(v1));
 
-        /* Send v2 (signed) if PSK is configured */
-        if (s_psk_set) {
-            uint8_t v2[ESPNOW_V2_LEN];
-            if (build_v2(v2)) {
-                esp_now_send(BROADCAST_MAC, v2, sizeof(v2));
+            if (s_psk_set) {
+                uint8_t v2[ESPNOW_V2_LEN];
+                if (build_v2(v2)) {
+                    esp_now_send(BROADCAST_MAC, v2, sizeof(v2));
+                }
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(ESPNOW_BROADCAST_INTERVAL_SEC * 1000));
+        /* Jittered interval: base + 0..499ms random to decorrelate
+         * broadcasts when many nodes are co-located. */
+        uint32_t jitter_ms = esp_random() % 500;
+        vTaskDelay(pdMS_TO_TICKS(ESPNOW_BROADCAST_INTERVAL_SEC * 1000 + jitter_ms));
     }
 }
 

@@ -201,7 +201,7 @@ static void ap_kick_task(void *arg)
     }
 }
 
-esp_err_t wifi_manager_init(void)
+esp_err_t wifi_manager_init(bool repeater_mode)
 {
     /* NVS required by WiFi */
     esp_err_t err = nvs_flash_init();
@@ -246,8 +246,11 @@ esp_err_t wifi_manager_init(void)
 
     ESP_LOGI(TAG, "AP started — SSID: %s, IP: %s", RBIO_AP_SSID, s_ap_ip);
 
-    /* If STA creds exist in NVS, connect automatically */
-    if (load_sta_creds() == ESP_OK && s_sta_ssid[0] != '\0') {
+    /* Root: connect STA to router if creds exist.
+     * Repeater: STA stays unassociated (channel scanning needs the radio). */
+    if (repeater_mode) {
+        ESP_LOGI(TAG, "Repeater mode — STA unassociated, skipping router connect");
+    } else if (load_sta_creds() == ESP_OK && s_sta_ssid[0] != '\0') {
         ESP_LOGI(TAG, "Found saved STA credentials for '%s'", s_sta_ssid);
         connect_sta();
     } else {
@@ -313,4 +316,16 @@ const char *wifi_manager_get_sta_ip(void)
 const char *wifi_manager_get_sta_ssid(void)
 {
     return s_sta_ssid;
+}
+
+esp_err_t wifi_manager_lock_ap_channel(uint8_t channel)
+{
+    if (channel == 0 || channel > 14) return ESP_ERR_INVALID_ARG;
+    esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "AP channel locked to %u", channel);
+    } else {
+        ESP_LOGW(TAG, "Failed to lock AP channel to %u: %s", channel, esp_err_to_name(err));
+    }
+    return err;
 }

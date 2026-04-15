@@ -28,7 +28,7 @@ static const char *TAG = "rbio_client";
 
 #define V1_MAGIC   0xBE
 #define V2_VERSION 0x02
-#define V1_LEN     13
+#define V1_LEN     14
 #define V2_LEN     37
 #define HMAC_LEN   20
 
@@ -168,8 +168,8 @@ static bool parse_v1(const uint8_t *data, int len, rbio_time_t *out)
     if (data[0] != V1_MAGIC) return false;
 
     uint8_t cs = 0;
-    for (int i = 0; i < 12; i++) cs ^= data[i];
-    if (cs != data[12]) {
+    for (int i = 0; i < 13; i++) cs ^= data[i];
+    if (cs != data[13]) {
         ESP_LOGW(TAG, "v1 checksum mismatch");
         return false;
     }
@@ -179,6 +179,7 @@ static bool parse_v1(const uint8_t *data, int len, rbio_time_t *out)
     out->ms       = get_u16_be(&data[5]);
     out->source   = data[7];
     out->uptime   = get_u32_be(&data[8]);
+    out->stratum  = data[12] & 0x07;
     out->seq      = 0;
     out->verified = false;
     return true;
@@ -197,6 +198,7 @@ static bool parse_v2(const uint8_t *data, int len, rbio_time_t *out)
     out->source   = data[7];
     out->uptime   = get_u32_be(&data[8]);
     out->seq      = get_u32_be(&data[12]);
+    out->stratum  = data[36] & 0x07;
     out->verified = false;
 
     if (s_has_psk) {

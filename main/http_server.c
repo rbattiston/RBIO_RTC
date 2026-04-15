@@ -4,6 +4,8 @@
 #include "ds3231.h"
 #include "espnow_time.h"
 #include "sntp_server.h"
+#include "mesh_role.h"
+#include "repeater.h"
 #include "esp_http_server.h"
 #include "esp_random.h"
 #include "esp_log.h"
@@ -19,6 +21,7 @@ static const char *source_str(time_source_t src)
     case TIME_SRC_NONE:   return "NONE";
     case TIME_SRC_DS3231: return "DS3231";
     case TIME_SRC_NTP:    return "NTP";
+    case TIME_SRC_ESPNOW: return "ESPNOW";
     default:              return "?";
     }
 }
@@ -57,6 +60,12 @@ static const char INDEX_HTML[] =
 "<div><span class='label'>Source: </span><span class='%s'>%s</span></div>"
 "<div><span class='label'>RTC set by NTP: </span><span class='%s'>%s</span></div>"
 "</div>"
+"<h2>Mesh</h2>"
+"<div class='status'>"
+"<div><span class='label'>Role: </span><span class='ok'>%s</span></div>"
+"<div><span class='label'>Stratum: </span><span class='%s'>%u</span></div>"
+"<div><span class='label'>Parent: </span>%s</div>"
+"</div>"
 "<h2>Battery &amp; Hardware</h2>"
 "<div class='status'>"
 "<div><span class='label'>Battery: </span><span class='batt %s'>%s</span></div>"
@@ -92,6 +101,17 @@ static const char INDEX_HTML[] =
 "<button type='submit'>Save PSK</button>"
 "<p class='note'>Clients must use the same PSK to verify signed beacons. "
 "Leave blank and save to disable v2 signing.</p>"
+"</form>"
+"<h2>Mesh Role</h2>"
+"<form method='POST' action='/role'>"
+"<label>Device role (takes effect on reboot)</label>"
+"<select name='role' style='width:100%%;padding:8px;background:#222;border:1px solid #444;color:#eee;border-radius:4px;font-family:monospace'>"
+"%s"
+"%s"
+"</select>"
+"<button type='submit'>Save Role</button>"
+"<p class='note'>ROOT: connects to router, syncs NTP, broadcasts stratum 0. "
+"REPEATER: no router, receives from upstream mesh node, re-broadcasts at stratum+1.</p>"
 "</form>"
 "</body></html>";
 
@@ -158,6 +178,34 @@ static esp_err_t index_get_handler(httpd_req_t *req)
         snprintf(psk_display, sizeof(psk_display), "Not set");
     }
 
+    /* Mesh */
+    mesh_role_t role = mesh_role_get();
+    uint8_t stratum = time_manager_get_stratum();
+    const char *stratum_class =
+        (stratum == 0) ? "ok" :
+        (stratum < 7)  ? "warn" : "err";
+    char parent_str[64];
+    if (role == MESH_ROLE_ROOT) {
+        snprintf(parent_str, sizeof(parent_str), "(root — no parent)");
+    } else if (repeater_has_parent()) {
+        const uint8_t *pm = repeater_get_parent_mac();
+        snprintf(parent_str, sizeof(parent_str),
+                 "%02x:%02x:%02x:%02x:%02x:%02x ch=%u rssi=%ddBm",
+                 pm[0], pm[1], pm[2], pm[3], pm[4], pm[5],
+                 repeater_get_parent_channel(),
+                 repeater_get_parent_rssi());
+    } else {
+        snprintf(parent_str, sizeof(parent_str), "searching...");
+    }
+
+    /* Role selector option HTML */
+    const char *root_opt = (role == MESH_ROLE_ROOT)
+        ? "<option value='0' selected>ROOT</option>"
+        : "<option value='0'>ROOT</option>";
+    const char *repeater_opt = (role == MESH_ROLE_REPEATER)
+        ? "<option value='1' selected>REPEATER</option>"
+        : "<option value='1'>REPEATER</option>";
+
     /* Flash messages */
     char msg_html[256] = "";
     size_t buf_len = httpd_req_get_url_query_len(req) + 1;
@@ -181,24 +229,32 @@ static esp_err_t index_get_handler(httpd_req_t *req)
                              "<div class='msg warn'>Invalid PSK. Must be exactly 64 hex characters (32 bytes).</div>");
                 }
             }
+            if (httpd_query_key_value(buf, "role", val, sizeof(val)) == ESP_OK) {
+                snprintf(msg_html, sizeof(msg_html),
+                         "<div class='msg ok'>Role saved. Reboot the device for changes to take effect.</div>");
+            }
         }
         free(buf);
     }
 
-    char *page = malloc(sizeof(INDEX_HTML) + 768);
+    char *page = malloc(sizeof(INDEX_HTML) + 1024);
     if (!page) return ESP_ERR_NO_MEM;
 
-    int len = snprintf(page, sizeof(INDEX_HTML) + 768, INDEX_HTML,
+    int len = snprintf(page, sizeof(INDEX_HTML) + 1024, INDEX_HTML,
                        time_str,
                        src_class, source_str(src),
                        rtc_class, rtc_str,
+                       mesh_role_str(role),
+                       stratum_class, stratum,
+                       parent_str,
                        batt_class, batt_str,
                        temp_str,
                        sta_class, sta_str,
                        sta_ip,
                        espnow_class, espnow_str,
                        psk_display,
-                       msg_html);
+                       msg_html,
+                       root_opt, repeater_opt);
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, page, len);
@@ -345,6 +401,30 @@ static esp_err_t psk_generate_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── POST /role ── set mesh role (root or repeater) ──────────────── */
+
+static esp_err_t role_post_handler(httpd_req_t *req)
+{
+    char body[64] = "";
+    int received = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data");
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    char role_str[8] = "";
+    httpd_query_key_value(body, "role", role_str, sizeof(role_str));
+
+    mesh_role_t role = (strcmp(role_str, "1") == 0) ? MESH_ROLE_REPEATER : MESH_ROLE_ROOT;
+    mesh_role_set(role);
+
+    httpd_resp_set_status(req, "303 See Other");
+    httpd_resp_set_hdr(req, "Location", "/?role=saved");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
 /* ── GET /status ── JSON status for programmatic access ─────────── */
 
 static esp_err_t status_get_handler(httpd_req_t *req)
@@ -365,7 +445,16 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         snprintf(psk_fp, sizeof(psk_fp), "\"%s\"", fp);
     }
 
-    char json[512];
+    char parent_mac_str[24] = "null";
+    mesh_role_t role = mesh_role_get();
+    if (role == MESH_ROLE_REPEATER && repeater_has_parent()) {
+        const uint8_t *pm = repeater_get_parent_mac();
+        snprintf(parent_mac_str, sizeof(parent_mac_str),
+                 "\"%02x:%02x:%02x:%02x:%02x:%02x\"",
+                 pm[0], pm[1], pm[2], pm[3], pm[4], pm[5]);
+    }
+
+    char json[768];
     int len = snprintf(json, sizeof(json),
         "{\"time\":\"%04d-%02d-%02dT%02d:%02d:%02dZ\","
         "\"source\":\"%s\","
@@ -378,7 +467,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         "\"espnow_v2_active\":%s,"
         "\"espnow_psk_fingerprint\":%s,"
         "\"sntp_served\":%lu,"
-        "\"sntp_dropped\":%lu}",
+        "\"sntp_dropped\":%lu,"
+        "\"role\":\"%s\","
+        "\"stratum\":%u,"
+        "\"parent_mac\":%s,"
+        "\"parent_rssi\":%d}",
         t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
         t.tm_hour, t.tm_min, t.tm_sec,
         source_str(time_manager_get_source()),
@@ -391,7 +484,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         espnow_time_has_psk() ? "true" : "false",
         psk_fp,
         (unsigned long)sntp_server_get_served(),
-        (unsigned long)sntp_server_get_dropped());
+        (unsigned long)sntp_server_get_dropped(),
+        mesh_role_str(role),
+        time_manager_get_stratum(),
+        parent_mac_str,
+        (int)repeater_get_parent_rssi());
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json, len);
@@ -413,7 +510,7 @@ esp_err_t http_server_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 10;
 
     httpd_handle_t server = NULL;
     esp_err_t err = httpd_start(&server, &config);
@@ -428,6 +525,7 @@ esp_err_t http_server_start(void)
         { .uri = "/wifi",         .method = HTTP_POST, .handler = wifi_post_handler },
         { .uri = "/psk",          .method = HTTP_POST, .handler = psk_post_handler },
         { .uri = "/psk/generate", .method = HTTP_GET,  .handler = psk_generate_handler },
+        { .uri = "/role",         .method = HTTP_POST, .handler = role_post_handler },
         { .uri = "/status",       .method = HTTP_GET,  .handler = status_get_handler },
     };
 

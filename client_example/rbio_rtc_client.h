@@ -143,9 +143,10 @@
 typedef struct {
     uint32_t epoch;        /* Unix epoch seconds */
     uint16_t ms;           /* Milliseconds within second */
-    uint8_t  source;       /* 0=none, 1=DS3231, 2=NTP */
+    uint8_t  source;       /* 0=none, 1=DS3231, 2=NTP, 3=ESPNOW */
     uint32_t uptime;       /* Server uptime in seconds */
     uint32_t seq;          /* Sequence number (0 for v1) */
+    uint8_t  stratum;      /* Mesh hop count (0=root, 1+=repeater) */
     bool     verified;     /* true if HMAC verified (v2 + PSK) */
     uint8_t  version;      /* 1 or 2 */
 } rbio_time_t;
