@@ -107,13 +107,14 @@ static void resync_task(void *arg)
         int drift = (int)(sys_epoch - rtc_epoch);
 
         if (abs(drift) > 2) {
-            if (s_source == TIME_SRC_NTP) {
-                /* NTP is more accurate — push system time to DS3231 */
+            if (s_source == TIME_SRC_NTP || s_source == TIME_SRC_ESPNOW) {
+                /* System clock is authoritative (corrected by NTP or upstream
+                 * beacons). Push system time to DS3231 to keep it fresh. */
                 struct tm sys_tm;
                 time_t now = time(NULL);
                 gmtime_r(&now, &sys_tm);
                 ds3231_set_time(&sys_tm);
-                ESP_LOGI(TAG, "Pushed NTP-derived time to DS3231 (drift was %ds)", drift);
+                ESP_LOGI(TAG, "Pushed upstream-derived time to DS3231 (drift was %ds)", drift);
             } else {
                 /* DS3231 is our only source — correct system clock */
                 struct timeval tv = { .tv_sec = rtc_epoch, .tv_usec = 0 };

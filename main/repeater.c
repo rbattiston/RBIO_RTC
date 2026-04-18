@@ -231,9 +231,13 @@ static void unlock_parent(const char *reason)
 
 /* ── Scan task ──────────────────────────────────────────────────── */
 
+/* Log a heartbeat every N received beacons (~5 min at 5s interval) */
+#define HEARTBEAT_EVERY  60
+
 static void scan_task(void *arg)
 {
     uint32_t backoff_ms = BACKOFF_INIT_MS;
+    uint32_t beacon_count = 0;
     uint8_t chan_start = 1;
     uint8_t chan_count = 13;
 
@@ -259,6 +263,17 @@ static void scan_task(void *arg)
                     if (memcmp(c.src_mac, s_parent.mac, 6) == 0) {
                         /* Normal case: beacon from current parent */
                         apply_sync_from_candidate(&c);
+                        beacon_count++;
+                        if ((beacon_count % HEARTBEAT_EVERY) == 0) {
+                            time_t now = time(NULL);
+                            struct tm t;
+                            gmtime_r(&now, &t);
+                            ESP_LOGI(TAG, "Parent alive: %lu beacons, rssi=%ddBm, "
+                                     "time=%04d-%02d-%02d %02d:%02d:%02d UTC",
+                                     (unsigned long)beacon_count, s_parent.rssi,
+                                     t.tm_year+1900, t.tm_mon+1, t.tm_mday,
+                                     t.tm_hour, t.tm_min, t.tm_sec);
+                        }
                     } else if (is_better_parent(&c)) {
                         ESP_LOGI(TAG, "Switching to better parent (stratum %u, rssi %d)",
                                  c.stratum, c.rssi);
