@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
+#include "nvs.h"
 #include "driver/rmt_tx.h"
 #include "driver/rmt_encoder.h"
 #include "freertos/FreeRTOS.h"
@@ -13,11 +14,11 @@
 
 static const char *TAG = "status_led";
 
-/* WS2812 on Freenove devkit */
-#define LED_GPIO        16
-#define LED_RMT_RES_HZ  10000000  /* 10MHz = 100ns per tick */
+#define NVS_NAMESPACE   "rbio_led"
+#define NVS_KEY_GPIO    "gpio"
 
-/* WS2812 timing (in 100ns ticks) */
+/* WS2812 timing at 10MHz (100ns per tick) */
+#define LED_RMT_RES_HZ  10000000
 #define T0H  3
 #define T0L  9
 #define T1H  9
@@ -25,16 +26,51 @@ static const char *TAG = "status_led";
 
 static rmt_channel_handle_t s_rmt_channel = NULL;
 static rmt_encoder_handle_t s_encoder = NULL;
-
-/* MAC-derived device identifier (blue blink count) */
+static uint8_t s_led_gpio = LED_GPIO_DISABLED;
 static uint8_t s_mac_blink_count = 0;
+
+/* ── NVS-backed GPIO configuration ─────────────────────────────── */
+
+static uint8_t load_gpio_from_nvs(void)
+{
+    nvs_handle_t h;
+    uint8_t val = LED_GPIO_DISABLED;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, NVS_KEY_GPIO, &val);
+        nvs_close(h);
+    }
+    return val;
+}
+
+esp_err_t status_led_set_gpio(uint8_t gpio)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+
+    nvs_set_u8(h, NVS_KEY_GPIO, gpio);
+    nvs_commit(h);
+    nvs_close(h);
+
+    if (gpio == LED_GPIO_DISABLED) {
+        ESP_LOGI(TAG, "LED disabled (takes effect on reboot)");
+    } else {
+        ESP_LOGI(TAG, "LED GPIO set to %u (takes effect on reboot)", gpio);
+    }
+    return ESP_OK;
+}
+
+uint8_t status_led_get_gpio(void)
+{
+    return s_led_gpio;
+}
 
 /* ── WS2812 driver ──────────────────────────────────────────────── */
 
-static esp_err_t ws2812_init(void)
+static esp_err_t ws2812_init(uint8_t gpio)
 {
     rmt_tx_channel_config_t tx_cfg = {
-        .gpio_num = LED_GPIO,
+        .gpio_num = gpio,
         .clk_src = RMT_CLK_SRC_DEFAULT,
         .resolution_hz = LED_RMT_RES_HZ,
         .mem_block_symbols = 64,
@@ -66,13 +102,10 @@ static void led_off(void)     { ws2812_set(0, 0, 0); }
 static void led_red(void)     { ws2812_set(40, 0, 0); }
 static void led_green(void)   { ws2812_set(0, 40, 0); }
 static void led_amber(void)   { ws2812_set(40, 20, 0); }
-static void led_blue(void)    { ws2812_set(0, 0, 60); }  /* slightly brighter to stand out */
+static void led_blue(void)    { ws2812_set(0, 0, 60); }
 
 /* ── MAC-based device identifier ────────────────────────────────── */
 
-/* Find the last numeral digit (0-9) in the AP MAC's hex representation
- * and use that as the blue-blink count. Deterministic per device,
- * visually countable when devices are side-by-side. */
 static uint8_t compute_mac_blink_count(void)
 {
     uint8_t mac[6];
@@ -82,22 +115,21 @@ static uint8_t compute_mac_blink_count(void)
     snprintf(hex, sizeof(hex), "%02x%02x%02x%02x%02x%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
-    /* Scan from the end for last 0-9 digit */
     for (int i = 11; i >= 0; i--) {
         if (hex[i] >= '0' && hex[i] <= '9') {
             return (uint8_t)(hex[i] - '0');
         }
     }
-    return 0;  /* MAC is all hex letters — unlikely but possible */
+    return 0;
 }
 
 /* ── Status state machine ───────────────────────────────────────── */
 
 typedef enum {
-    STATUS_NO_TIME,      /* red solid */
-    STATUS_DS3231_ONLY,  /* amber pulse */
-    STATUS_NTP_HEALTHY,  /* green heartbeat */
-    STATUS_BATTERY_BAD,  /* red rapid flash */
+    STATUS_NO_TIME,
+    STATUS_DS3231_ONLY,
+    STATUS_NTP_HEALTHY,
+    STATUS_BATTERY_BAD,
 } status_state_t;
 
 static status_state_t get_status(void)
@@ -113,18 +145,10 @@ static status_state_t get_status(void)
     return STATUS_NO_TIME;
 }
 
-/* Perform the MAC-identifier blue blink sequence.
- * Each blink: 150ms on, 200ms off. Then a 1s pause before returning
- * to normal status display.
- *
- * This function blocks for roughly N * 350ms + 1000ms. Called
- * periodically between status tick cycles. */
 static void do_mac_identifier_blinks(void)
 {
     uint8_t n = s_mac_blink_count;
     if (n == 0) {
-        /* Device MAC has no numeric digits — show a single long blue pulse
-         * instead so the LED still indicates "this is my identifier" phase. */
         led_blue();
         vTaskDelay(pdMS_TO_TICKS(500));
         led_off();
@@ -138,7 +162,6 @@ static void do_mac_identifier_blinks(void)
         led_off();
         vTaskDelay(pdMS_TO_TICKS(200));
     }
-    /* Clear gap after the burst so two sequential bursts don't merge */
     vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
@@ -147,15 +170,12 @@ static void status_led_task(void *arg)
     int tick = 0;
     bool sta_was_connected = false;
 
-    /* Do one MAC-identifier blink sequence right at start so the user
-     * can identify the device immediately after boot. */
     do_mac_identifier_blinks();
 
     for (;;) {
         status_state_t state = get_status();
         bool sta_now = wifi_manager_sta_connected();
 
-        /* Brief blue flash on STA connect event (separate from identifier) */
         if (sta_now && !sta_was_connected) {
             for (int i = 0; i < 3; i++) {
                 led_blue();
@@ -173,18 +193,14 @@ static void status_led_task(void *arg)
         case STATUS_NO_TIME:
             led_red();
             break;
-
         case STATUS_DS3231_ONLY:
             if ((tick % 4) < 3) led_amber();
             else led_off();
             break;
-
         case STATUS_NTP_HEALTHY:
-            /* Green heartbeat: brief blink every 3s */
             if ((tick % 6) == 0) led_green();
             else led_off();
             break;
-
         case STATUS_BATTERY_BAD:
             if (tick % 2) led_red();
             else led_off();
@@ -194,9 +210,6 @@ static void status_led_task(void *arg)
         tick++;
         vTaskDelay(pdMS_TO_TICKS(500));
 
-        /* Every ~12 seconds, show the MAC identifier blink sequence.
-         * The sequence itself takes N * 350ms + 1s (e.g. 5 blinks = 2.75s)
-         * during which normal status display is paused. */
         if ((tick % 24) == 0) {
             do_mac_identifier_blinks();
         }
@@ -207,22 +220,38 @@ static void status_led_task(void *arg)
 
 esp_err_t status_led_init(void)
 {
-    esp_err_t err = ws2812_init();
+    s_led_gpio = load_gpio_from_nvs();
+
+    /* No LED configured — skip everything, touch no pins */
+    if (s_led_gpio == LED_GPIO_DISABLED) {
+        ESP_LOGI(TAG, "No LED configured (set via web UI, takes effect on reboot)");
+        return ESP_OK;
+    }
+
+#ifdef CONFIG_SPIRAM
+    /* Guard against PSRAM conflict on WROVER modules:
+     * GPIO 16 and 17 are used for PSRAM data lines. */
+    if (s_led_gpio == 16 || s_led_gpio == 17) {
+        ESP_LOGW(TAG, "GPIO %u conflicts with PSRAM — LED disabled", s_led_gpio);
+        s_led_gpio = LED_GPIO_DISABLED;
+        return ESP_OK;
+    }
+#endif
+
+    esp_err_t err = ws2812_init(s_led_gpio);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "WS2812 init failed: %s", esp_err_to_name(err));
-        return err;
+        ESP_LOGE(TAG, "WS2812 init on GPIO %u failed: %s", s_led_gpio, esp_err_to_name(err));
+        s_led_gpio = LED_GPIO_DISABLED;
+        return ESP_OK;  /* non-fatal — device works without LED */
     }
 
     s_mac_blink_count = compute_mac_blink_count();
-    ESP_LOGI(TAG, "Device ID blink count (from MAC): %u blue blinks every ~12s",
-             s_mac_blink_count);
+    ESP_LOGI(TAG, "LED on GPIO %u — ID blink count: %u", s_led_gpio, s_mac_blink_count);
 
     led_red();
 
     BaseType_t ret = xTaskCreate(status_led_task, "status_led", 2048, NULL, 1, NULL);
     if (ret != pdPASS) return ESP_FAIL;
 
-    ESP_LOGI(TAG, "Status LED on GPIO %d: RED=no time, AMBER=DS3231, GREEN=synced, BLUE=device ID",
-             LED_GPIO);
     return ESP_OK;
 }

@@ -6,6 +6,7 @@
 #include "sntp_server.h"
 #include "mesh_role.h"
 #include "repeater.h"
+#include "status_led.h"
 #include "esp_http_server.h"
 #include "esp_random.h"
 #include "esp_log.h"
@@ -70,6 +71,7 @@ static const char INDEX_HTML[] =
 "<div class='status'>"
 "<div><span class='label'>Battery: </span><span class='batt %s'>%s</span></div>"
 "<div><span class='label'>RTC Temp: </span>%s</div>"
+"<div><span class='label'>Status LED: </span>%s</div>"
 "</div>"
 "<h2>Network</h2>"
 "<div class='status'>"
@@ -117,6 +119,15 @@ static const char INDEX_HTML[] =
 "<button type='submit'>Save Role</button>"
 "<p class='note'>ROOT: connects to router, syncs NTP, broadcasts stratum 0. "
 "REPEATER: no router, receives from upstream mesh node, re-broadcasts at stratum+1.</p>"
+"</form>"
+"<h2>Status LED (WS2812)</h2>"
+"<form method='POST' action='/led'>"
+"<label>GPIO pin (leave blank or 255 to disable)</label>"
+"<input type='number' name='gpio' min='0' max='255' value='%s' "
+"style='width:100%%;padding:8px;background:#222;border:1px solid #444;color:#eee;border-radius:4px;font-family:monospace'>"
+"<button type='submit'>Save LED GPIO</button>"
+"<p class='note'>Common values: 16 (Freenove devkit), 2 (generic devkit blue LED). "
+"Blank or 255 = disabled. Requires WS2812/NeoPixel LED. Takes effect on reboot.</p>"
 "</form>"
 "</body></html>";
 
@@ -203,6 +214,18 @@ static esp_err_t index_get_handler(httpd_req_t *req)
         snprintf(parent_str, sizeof(parent_str), "searching...");
     }
 
+    /* LED status */
+    uint8_t led_gpio = status_led_get_gpio();
+    char led_status[32];
+    char led_gpio_str[8];
+    if (led_gpio == LED_GPIO_DISABLED) {
+        snprintf(led_status, sizeof(led_status), "Disabled");
+        led_gpio_str[0] = '\0';
+    } else {
+        snprintf(led_status, sizeof(led_status), "GPIO %u", led_gpio);
+        snprintf(led_gpio_str, sizeof(led_gpio_str), "%u", led_gpio);
+    }
+
     /* Role selector option HTML */
     const char *root_opt = (role == MESH_ROLE_ROOT)
         ? "<option value='0' selected>ROOT</option>"
@@ -243,6 +266,10 @@ static esp_err_t index_get_handler(httpd_req_t *req)
                 snprintf(msg_html, sizeof(msg_html),
                          "<div class='msg warn'>WiFi credentials erased. Device is no longer connected to a router.</div>");
             }
+            if (httpd_query_key_value(buf, "led", val, sizeof(val)) == ESP_OK) {
+                snprintf(msg_html, sizeof(msg_html),
+                         "<div class='msg ok'>LED GPIO saved. Reboot for changes to take effect.</div>");
+            }
         }
         free(buf);
     }
@@ -263,12 +290,14 @@ static esp_err_t index_get_handler(httpd_req_t *req)
                        parent_str,
                        batt_class, batt_str,
                        temp_str,
+                       led_status,
                        sta_class, sta_str,
                        sta_ip,
                        espnow_class, espnow_str,
                        psk_display,
                        msg_html,
-                       root_opt, repeater_opt);
+                       root_opt, repeater_opt,
+                       led_gpio_str);
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, page, len);
@@ -431,6 +460,35 @@ static esp_err_t wifi_forget_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ── POST /led ── set LED GPIO pin ───────────────────────────────── */
+
+static esp_err_t led_post_handler(httpd_req_t *req)
+{
+    char body[64] = "";
+    int received = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data");
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    char gpio_str[8] = "";
+    httpd_query_key_value(body, "gpio", gpio_str, sizeof(gpio_str));
+
+    uint8_t gpio = LED_GPIO_DISABLED;
+    if (gpio_str[0] != '\0') {
+        int val = atoi(gpio_str);
+        gpio = (val >= 0 && val < 255) ? (uint8_t)val : LED_GPIO_DISABLED;
+    }
+
+    status_led_set_gpio(gpio);
+
+    httpd_resp_set_status(req, "303 See Other");
+    httpd_resp_set_hdr(req, "Location", "/?led=saved");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
 /* ── POST /role ── set mesh role (root or repeater) ──────────────── */
 
 static esp_err_t role_post_handler(httpd_req_t *req)
@@ -559,6 +617,7 @@ esp_err_t http_server_start(void)
         { .uri = "/psk",          .method = HTTP_POST, .handler = psk_post_handler },
         { .uri = "/psk/generate", .method = HTTP_GET,  .handler = psk_generate_handler },
         { .uri = "/role",         .method = HTTP_POST, .handler = role_post_handler },
+        { .uri = "/led",          .method = HTTP_POST, .handler = led_post_handler },
         { .uri = "/status",       .method = HTTP_GET,  .handler = status_get_handler },
     };
 
